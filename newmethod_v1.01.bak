@@ -202,6 +202,10 @@ x = y = xBase = yBase = theta = carDoorTheta = seita = d = 0
 # 长度单位m，d为小车与小球距离
 # 坐标系以中心为原点，己方坐标为负
 
+def printCommand(string):
+    print("Now data: x:" + str(x) + ", y:" + str(y) + ", theta:" + str(theta) + ", carDoor:" + str(carDoorTheta) + ", carBall:" + str(seita))
+    print("  Operation: " + string)
+
 # 小车初始位置
 (X_0, Y_0) = (0.43, -1.145)
 # 球门位置的y坐标，车坐标至少得是这么大才能推进去球
@@ -216,6 +220,7 @@ def init():
     y = Y_0
     xBase = x - x0
     yBase = y - y0
+    printCommand("Init!")
 
 # 获取小车的世界坐标并且返回
 def worldPosition():
@@ -259,26 +264,34 @@ def directly(frame):
         if math.fabs(carDoorTheta - seita) < DIFF:
             if math.fabs(seita) > EPS:
                 # 如果seita为正，则需要向顺时针方向转
-                controlNow(0.22,seita/T_CONTROL)
+                controlNow(0, -seita/T_CONTROL)
+                printCommand("Directly Rotate " + str(-seita/T_CONTROL))
             else:
                 # 这里需要直接向前怼球，所以不指定距离
                 controlNow(0.22,0)
+                printCommand("Directly Forward")
         elif carDoorTheta > SEITA_ADDER and seita > SEITA_ADDER:
             # 球门和球在同侧的情况
             if carDoorTheta > seita:
                 controlNow(0.22,0)
+                printCommand("All right, Directly Forward")
             else:
                 controlNow(-0.22,0)
+                printCommand("All right, Directly Backward")
         elif carDoorTheta < -SEITA_ADDER and seita < -SEITA_ADDER:
             # 球门和球在同侧的情况
             if carDoorTheta < seita:
                 controlNow(0.22,0)
+                printCommand("All left, Directly Forward")
             else:
                 controlNow(-0.22,0)
+                printCommand("All left, Directly Backward")
         elif carDoorTheta < seita:
-            controlNow(0.22,(seita + SEITA_ADDER)/T_CONTROL)
+            controlNow(0.22, -(seita + SEITA_ADDER)/T_CONTROL)
+            printCommand("Right, rotate: " + str(-(seita + SEITA_ADDER)/T_CONTROL))
         else:
-            controlNow(0.22,(seita - SEITA_ADDER)/T_CONTROL)
+            controlNow(0.22, -(seita - SEITA_ADDER)/T_CONTROL)
+            printCommand("Left, rotate: " + str(-(seita - SEITA_ADDER)/T_CONTROL))
 
 
 if __name__=="__main__":
@@ -295,9 +308,10 @@ if __name__=="__main__":
 
     for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
         raw_capture.truncate(0)
-        angErr,disErr = getErr(frame)
+        disErr,angErr = getErr(frame)
         print(time.time() - oldtime)
         oldtime = time.time()
+        print(angErr)
         if (angErr != angErr):
             tempTime2 = time.time()
             controlNow(0,1.5)
