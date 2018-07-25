@@ -63,7 +63,7 @@ WAFFLE_MAX_ANG_VEL = 1.82
 LIN_VEL_STEP_SIZE = 0.01
 ANG_VEL_STEP_SIZE = 0.1
 
-T_CONTROL = 0.5
+T_CONTROL = 10
 
 msg = """
 Control Your TurtleBot3!
@@ -304,27 +304,4 @@ if __name__=="__main__":
     t1 = threading.Thread(target = controller, args=(controllerEvent,), name = "controller")
     t1.start()
 
-    oldtime = time.time()
-
-    for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
-        raw_capture.truncate(0)
-        disErr,angErr = getErr(frame)
-        print(time.time() - oldtime)
-        oldtime = time.time()
-        print(angErr)
-        if (angErr != angErr):
-            tempTime2 = time.time()
-            controlNow(0,1.5)
-            print("control: " + str(time.time() - tempTime2))
-            continue
-        else:
-            tempTime = time.time()
-            directly(frame)
-            print("directly: " + str(time.time() - tempTime))
-
-    twist = Twist()
-    twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
-    twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
-    pub.publish(twist)
-
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    controlNow(0.22, 2.84)
