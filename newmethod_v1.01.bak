@@ -1,0 +1,316 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# Copyright (c) 2011, Willow Garage, Inc.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#    * Neither the name of the Willow Garage, Inc. nor the names of its
+#      contributors may be used to endorse or promote products derived from
+#       this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import rospy
+from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Pose2D
+import sys, select, termios, tty
+# import socket
+import math 
+import json
+import threading
+import os
+import Queue
+import time
+
+import PIL.Image as Image
+import PIL.ImageStat as ImageStat
+from PIL import ImageEnhance
+import os
+from picamera.array import PiRGBArray
+from picamera import PiCamera
+import cv2
+import numpy as np
+from numpy import NaN
+import requests
+from find_pack import *
+
+from nav_msgs.msg import Odometry
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+
+BURGER_MAX_LIN_VEL = 0.22
+BURGER_MAX_ANG_VEL = 2.84
+
+WAFFLE_MAX_LIN_VEL = 0.26
+WAFFLE_MAX_ANG_VEL = 1.82
+
+LIN_VEL_STEP_SIZE = 0.01
+ANG_VEL_STEP_SIZE = 0.1
+
+T_CONTROL = 0.5
+
+msg = """
+Control Your TurtleBot3!
+---------------------------
+Moving around:
+        w
+   a    s    d
+        x
+
+w/x : increase/decrease linear velocity (Burger : ~ 0.22, Waffle and Waffle Pi : ~ 0.26)
+a/d : increase/decrease angular velocity (Burger : ~ 2.84, Waffle and Waffle Pi : ~ 1.82)
+
+space key, s : force stop
+
+CTRL-C to quit
+"""
+
+e = """
+Communications Failed
+"""
+# targetHost = "192.168.137.67"
+# targetPort = 55555
+
+# client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# client.connect((targetHost, targetPort))
+url = "http://172.16.16.10:8888/yolo_method"
+
+#------------------------------ image get ---------------------------------------------------
+def req_yolo(img):
+    res = {"image": str(img.tolist()).encode('base64')} 
+    result= json.loads(requests.post(url, json=res))
+    return result 
+
+pic_size = (640,368)
+camera = PiCamera()
+camera.resolution = pic_size
+camera.framerate = 30
+camera.awb_mode = "off"
+# raw_capture = PiRGBArray(camera, size = pic_size)
+camera.brightness = 50 # 设置图像的亮度(50表示白平衡的状态)
+camera.shutter_speed = 6000000 # 相机快门速度
+camera.iso = 800 # ISO标准实际上就是来自胶片工业的标准称谓，ISO是衡量胶片对光线敏感程度的标准。如50 ISO, 64 ISO, 100 ISO表示在曝光感应速度上要比高数值的来得慢，高数值ISO是指超过200以上的标准，如200 ISO, 400 ISO
+camera.sharpness = 0 #设置图像的锐度值，默认是0，取值范围是-100~100之间
+camera.awb_mode = "fluorescent"
+raw_capture = PiRGBArray(camera, size = pic_size)
+
+
+
+def getKey():
+    tty.setraw(sys.stdin.fileno())
+    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+    if rlist:
+        key = sys.stdin.read(1)
+    else:
+        key = ''
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    return key
+
+def getErr(frame):  
+    cv_image=frame.array
+    # cv2.imwrite(str(time.time())+'.jpg',cv_image)
+    rgb_image=np.zeros_like(cv_image)
+    rgb_image[:,:,0] = cv_image[:,:,2]
+    rgb_image[:,:,1] = cv_image[:,:,1]
+    rgb_image[:,:,2] = cv_image[:,:,0]
+    r,seita,_ = get_pos_dist(rgb_image)
+    return (r,seita)
+    
+ #---------------------------------Car Control Functions---------------------------------------- 
+
+def vels(target_linear_vel, target_angular_vel):
+    return "currently:\tlinear vel %s\t angular vel %s " % (target_linear_vel,target_angular_vel)
+
+
+def pub_vel(v,w):
+    twist = Twist()
+    twist.linear.x = v; twist.linear.y = 0.0; twist.linear.z = 0.0
+    twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = w
+    pub.publish(twist)
+    
+def quaternion(odom):
+    quaternion = (
+        odom.pose.pose.orientation.x,
+        odom.pose.pose.orientation.y,
+        odom.pose.pose.orientation.z,
+        odom.pose.pose.orientation.w)
+    euler = euler_from_quaternion(quaternion)
+    yaw = euler[2]
+    return yaw
+
+
+def get_gate_coord():
+    x = 2.83
+    y = -0.43
+    return x,y
+
+def get_current_coord():
+    odom = rospy.wait_for_message('/odom',Odometry)
+    x = odom.pose.pose.position.x
+    y = odom.pose.pose.position.y
+    z = quaternion(odom)
+    return (x,y,z)
+
+def controlNow(speedF, speedR):
+    global speedForward, speedRotate, controllerEvent
+    speedForward = speedF
+    speedRotate = speedR
+    controllerEvent.set()
+
+def controller(event):
+    global speedForward, speedRotate
+    myTime = time.time()
+    stopped = False
+    while True:
+        if event.is_set():
+            # 说明现在设置了新的指令
+            pub_vel(speedForward,speedRotate)
+            myTime = time.time()
+            event.clear()
+            stopped = False
+        if time.time() - myTime > T_CONTROL and not stopped:
+            # 如果超时T_CONTROL秒
+            speedRotate = 0
+            speedForward = 0
+            pub_vel(speedForward,speedRotate)
+            stopped = True
+        time.sleep(0.02) # 避免循环消耗资源过多
+#-------------------------------Basic Route Planning---------------------------------------------
+
+x = y = xBase = yBase = theta = carDoorTheta = seita = d = 0
+# theta为小车朝向与y夹角的角度值，若朝向偏左即逆时针，则为正。单位为：rad
+# carDoorTheta为小车朝向与球门中心夹角的角度值，若球门偏右，则为正。单位为：rad
+# seita为小车朝向与小球夹角的角度值。若小球偏右，则为正。单位为：rad
+# 如果小球偏左，则ballTheta为正
+# 长度单位m，d为小车与小球距离
+# 坐标系以中心为原点，己方坐标为负
+
+# 小车初始位置
+(X_0, Y_0) = (0.43, -1.145)
+# 球门位置的y坐标，车坐标至少得是这么大才能推进去球
+DOORPOS = 1.145
+
+# 校准初始值
+def init():
+    global x, y, theta, xBase, yBase
+    # 设置为初始值，getPosition返回(x,y,theta)的元组
+    (x0, y0, theta) = get_current_coord()
+    x = X_0
+    y = Y_0
+    xBase = x - x0
+    yBase = y - y0
+
+# 获取小车的世界坐标并且返回
+def worldPosition():
+    global xBase, yBase
+    (x, y, theta) = get_current_coord()
+    return (x + xBase, y + yBase, theta)
+
+# 更新所有变量
+def updateWorldPosition(frame):
+    global x, y, theta, carDoorTheta, seita, d
+    (x, y, theta) = worldPosition()
+    # d单位cm，seita单位°，所以需要转换
+    (d, seita) = getErr(frame)
+    d = d / 100
+    seita = math.radians(seita) + theta
+    while seita > math.pi:
+        seita -= math.pi
+    while seita <= -math.pi:
+        seita += math.pi
+    if y >= DOORPOS:
+        # 越界了，在球门后面位置
+        print("Behind door!")
+        if x > 0:
+            carDoorTheta = theta - math.pi / 2
+        else:
+            carDoorTheta = theta + math.pi / 2
+    else:
+        carDoorTheta = theta + math.atan(x / (y - DOORPOS))
+    while carDoorTheta > math.pi:
+        carDoorTheta -= math.pi
+    while carDoorTheta <= -math.pi:
+        carDoorTheta += math.pi
+
+EPS = 0.1 # 认为这个是误差，如果角度小于EPS就认为是正对着
+DIFF = 0.2 # 认为两个角度差距小于DIFF就是在一条直线上
+SEITA_ADDER = 0.2
+
+# 直接绕到延长线上
+def directly(frame):
+        updateWorldPosition(frame)
+        if math.fabs(carDoorTheta - seita) < DIFF:
+            if math.fabs(seita) > EPS:
+                # 如果seita为正，则需要向顺时针方向转
+                controlNow(0.22,seita/T_CONTROL)
+            else:
+                # 这里需要直接向前怼球，所以不指定距离
+                controlNow(0.22,0)
+        elif carDoorTheta > SEITA_ADDER and seita > SEITA_ADDER:
+            # 球门和球在同侧的情况
+            if carDoorTheta > seita:
+                controlNow(0.22,0)
+            else:
+                controlNow(-0.22,0)
+        elif carDoorTheta < -SEITA_ADDER and seita < -SEITA_ADDER:
+            # 球门和球在同侧的情况
+            if carDoorTheta < seita:
+                controlNow(0.22,0)
+            else:
+                controlNow(-0.22,0)
+        elif carDoorTheta < seita:
+            controlNow(0.22,(seita + SEITA_ADDER)/T_CONTROL)
+        else:
+            controlNow(0.22,(seita - SEITA_ADDER)/T_CONTROL)
+
+
+if __name__=="__main__":
+    settings = termios.tcgetattr(sys.stdin)
+    rospy.init_node('turtlebot3_teleop')
+    pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+    init()
+
+    controllerEvent = threading.Event()
+    t1 = threading.Thread(target = controller, args=(controllerEvent,), name = "controller")
+    t1.start()
+
+    oldtime = time.time()
+
+    for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
+        raw_capture.truncate(0)
+        angErr,disErr = getErr(frame)
+        print(time.time() - oldtime)
+        oldtime = time.time()
+        if (angErr != angErr):
+            tempTime2 = time.time()
+            controlNow(0,1.5)
+            print("control: " + str(time.time() - tempTime2))
+            continue
+        else:
+            tempTime = time.time()
+            directly(frame)
+            print("directly: " + str(time.time() - tempTime))
+
+    twist = Twist()
+    twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+    twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+    pub.publish(twist)
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
