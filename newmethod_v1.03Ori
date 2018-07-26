@@ -50,12 +50,14 @@ import numpy as np
 from numpy import NaN
 import requests
 from find_pack import *
+import threading
+import signal
 
 from nav_msgs.msg import Odometry
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
 
-BURGER_MAX_LIN_VEL = 0.22
-BURGER_MAX_ANG_VEL = 2.84
+BURGER_MAX_LIN_VEL = 0.22 / 10
+BURGER_MAX_ANG_VEL = 2.84 / 10
 
 BURGER_HALF_DISTANCE_WHEELS = BURGER_MAX_LIN_VEL / BURGER_MAX_ANG_VEL
 
@@ -65,7 +67,7 @@ WAFFLE_MAX_ANG_VEL = 1.82
 LIN_VEL_STEP_SIZE = 0.01
 ANG_VEL_STEP_SIZE = 0.1
 
-T_CONTROL = 30
+T_CONTROL = 0.5    #control period
 
 msg = """
 Control Your TurtleBot3!
@@ -93,6 +95,33 @@ Communications Failed
 # client.connect((targetHost, targetPort))
 url = "http://172.16.16.10:8888/yolo_method"
 
+#--------------system ------------------
+pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+
+quited = False
+
+
+def quit(signum, frame):
+    global quited
+    print ''
+    print 'stop fusion'
+    twist = Twist()
+    twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+    twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+    quited = True
+    pub.publish(twist)
+    print 'stop'
+    os._exit(0)
+
+# class myThread (threading.Thread):   #继承父类threading.Thread
+#     def __init__(self, threadID, name, counter, fun):
+#         threading.Thread.__init__(self)
+#         self.threadID = threadID
+#         self.name = name
+#         self.counter = counter
+#         self.fun = fun
+#     def run(self):                   #把要执行的代码写到run函数里面 线程在创建后会直接运行run函数 
+#         self.fun()
 
 #------------------------------ image get ---------------------------------------------------
 def req_yolo(img):
@@ -115,16 +144,16 @@ raw_capture = PiRGBArray(camera, size = pic_size)
 
 
 
-def getKey():
-    tty.setraw(sys.stdin.fileno())
-    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
-    if rlist:
-        key = sys.stdin.read(1)
-    else:
-        key = ''
+# def getKey():
+#     tty.setraw(sys.stdin.fileno())
+#     rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+#     if rlist:
+#         key = sys.stdin.read(1)
+#     else:
+#         key = ''
 
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
-    return key
+#     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+#     return key
 
 def getErr(frame):  
     cv_image=frame.array
@@ -143,10 +172,12 @@ def vels(target_linear_vel, target_angular_vel):
 
 
 def pub_vel(v,w):
+    # oldtime = time.time()
     twist = Twist()
     twist.linear.x = v; twist.linear.y = 0.0; twist.linear.z = 0.0
     twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = w
     pub.publish(twist)
+    # print("Publish:" + str(time.time() - oldtime))
     
 def quaternion(odom):
     quaternion = (
@@ -155,14 +186,24 @@ def quaternion(odom):
         odom.pose.pose.orientation.z,
         odom.pose.pose.orientation.w)
     euler = euler_from_quaternion(quaternion)
-    yaw = euler[2]
-    return yaw
+    return euler[2]
 
+# def get_gate_coord():
+#     x = 2.83
+#     y = -0.43
+#     return x,y
 
-def get_gate_coord():
-    x = 2.83
-    y = -0.43
-    return x,y
+# def update_current_coord_repeating_xytheta():
+#     global rawX, rawY, rawTheta
+#     while True:
+#         print("I'm alive!")
+#         odom = rospy.wait_for_message('/odom',Odometry)
+#         rawX = odom.pose.pose.position.x
+#         rawY = odom.pose.pose.position.y
+#         rawTheta = quaternion(odom)
+
+# def get_current_coord():
+#     return (rawX, rawY, rawTheta)
 
 def get_current_coord():
     odom = rospy.wait_for_message('/odom',Odometry)
@@ -182,6 +223,8 @@ def controller(event):
     myTime = time.time()
     stopped = False
     while True:
+        if quited:
+            return
         if event.is_set():
             # 说明现在设置了新的指令
             pub_vel(speedForward,speedRotate)
@@ -203,19 +246,19 @@ def controlRotateInner(R):
         R = -BURGER_HALF_DISTANCE_WHEELS
     omega = BURGER_MAX_LIN_VEL / (R + 2 * BURGER_HALF_DISTANCE_WHEELS)
     v = BURGER_MAX_LIN_VEL - omega * BURGER_HALF_DISTANCE_WHEELS
-    controlNow(v, omega)
+    pub_vel(v, omega)
 
 # R为正代表逆时针，R为负代表顺时针
 def controlRotateWithR(R):
     if R <= 0:
         R = -R
-        omega = BURGER_MAX_LIN_VEL / (R + 2 * BURGER_HALF_DISTANCE_WHEELS)
+        omega = BURGER_MAX_LIN_VEL / (R + BURGER_HALF_DISTANCE_WHEELS)
         v = BURGER_MAX_LIN_VEL - omega * BURGER_HALF_DISTANCE_WHEELS
         omega = -omega
     else:
-        omega = BURGER_MAX_LIN_VEL / (R + 2 * BURGER_HALF_DISTANCE_WHEELS)
+        omega = BURGER_MAX_LIN_VEL / (R + BURGER_HALF_DISTANCE_WHEELS)
         v = BURGER_MAX_LIN_VEL - omega * BURGER_HALF_DISTANCE_WHEELS
-    controlNow(v, omega)
+    pub_vel(v, omega)
 
 #------------------------------- task list part -------------------------------
 taskList = []
@@ -233,6 +276,7 @@ class task:
         if not self.started:
             # 直接运行！
             self.run()
+            print(self.fun)
             return False
         return self.started and (time.time() - self.startTime >= self.timeLen)
 
@@ -242,7 +286,7 @@ def runPriority():
     print("Priority Now!")
 
 def getNewTaskList():
-    print("Get now!")
+    # print("Get now!")
     return False
 
 # 基于TaskList的主函数
@@ -265,8 +309,8 @@ def controllerTaskList(priorityevent, event):
                 continue
         else:
             # 请求taskList的任务
-            if getNewTaskList():
-                continue
+            # if getNewTaskList():
+            #     continue
             if event.is_set():
                 # 说明现在设置了新的指令
                 pub_vel(speedForward,speedRotate)
@@ -286,7 +330,12 @@ def controllerTaskList(priorityevent, event):
 # 首先转向球的方向
 def rotatingToBehind():
     global taskList
-    taskList.append(task(seita / BURGER_MAX_ANG_VEL, controlNow, 0, BURGER_MAX_ANG_VEL))
+    if seita > 0:
+        print("Let rotate behind, negative, time " + str(seita / BURGER_MAX_ANG_VEL))
+        taskList.append(task(seita / BURGER_MAX_ANG_VEL, pub_vel, 0, -BURGER_MAX_ANG_VEL))
+    else:
+        print("Let rotate behind, positive, time " + str(-seita / BURGER_MAX_ANG_VEL))
+        taskList.append(task(-seita / BURGER_MAX_ANG_VEL, pub_vel, 0, BURGER_MAX_ANG_VEL))
     # 之后就可以绕球转了!
     taskList.append(task(0, checkD))
 
@@ -295,31 +344,47 @@ BALL_CAR_DIS = 0.3
 # 有一些误差，距离球的距离的偏差值
 BALL_CAR_EPS = 0.05
 
+Forward = Backward = RotatePositive = RotateNegetive = pub_vel
+
 # 绕球转动
 def checkD():
     global taskList
     # 如果和理想距离差的比较多，就过去！
     if d > BALL_CAR_DIS + BALL_CAR_EPS:
         # d比较大，往前走
-        taskList.append(task((d - BALL_CAR_DIS) / BURGER_MAX_LIN_VEL, controlNow, BURGER_MAX_LIN_VEL, 0))
+        print("Added forward " + str(d - BALL_CAR_DIS))
+        taskList.append(task((d - BALL_CAR_DIS) / BURGER_MAX_LIN_VEL, Forward, BURGER_MAX_LIN_VEL, 0))
     elif BALL_CAR_DIS > d + BALL_CAR_EPS:
         # d比较小，往后走
-        taskList.append(task((BALL_CAR_DIS - d) / BURGER_MAX_LIN_VEL, controlNow, -BURGER_MAX_LIN_VEL, 0))
+        print("Added backward " + str(-(d - BALL_CAR_DIS)))
+        taskList.append(task((BALL_CAR_DIS - d) / BURGER_MAX_LIN_VEL, Backward, -BURGER_MAX_LIN_VEL, 0))
     # 之后转动到球门和球延长线后面
     if carDoorTheta > 0:
         # 球门在右侧，所以逆时针转
-        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, controlNow, 0, BURGER_MAX_ANG_VEL))
+        print("Rotate Positive value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
+        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotatePositive, 0, BURGER_MAX_ANG_VEL))
         # 之后顺时针走
-        taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) / BURGER_MAX_LIN_VEL * , controlRotateWithR, -BALL_CAR_DIS))
+        d2_2 = (x ** 2) + (y - DOORPOS) ** 2
+        d3 = math.sqrt(BALL_CAR_DIS**2 + d2_2 - 2 * BALL_CAR_DIS * math.sqrt(d2_2) * math.cos(carDoorTheta))
+        alpha = math.asin(BALL_CAR_DIS / d3 * math.sin(carDoorTheta)) + carDoorTheta
+        print("Rotate Negative with R, time " + str((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL))
+        taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL , controlRotateWithR, -BALL_CAR_DIS))
         # 转回来朝向球
-        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, controlNow, 0, -BURGER_MAX_ANG_VEL))
+        print("Rotate Negative value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
+        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, pub_vel, 0, -BURGER_MAX_ANG_VEL))
     else:
         # 球门在左侧，所以顺时针转
-        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, controlNow, 0, -BURGER_MAX_ANG_VEL))
+        print("Rotate Negative value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
+        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, pub_vel, 0, -BURGER_MAX_ANG_VEL))
         # 之后逆时针走
-        taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) / BURGER_MAX_LIN_VEL, controlRotateWithR, BALL_CAR_DIS))
+        d2_2 = (x ** 2) + (y - DOORPOS) ** 2
+        d3 = math.sqrt(BALL_CAR_DIS**2 + d2_2 - 2 * BALL_CAR_DIS * math.sqrt(d2_2) * math.cos(carDoorTheta))
+        alpha = math.asin(BALL_CAR_DIS / d3 * math.sin(-carDoorTheta)) - carDoorTheta
+        print("Rotate Positive with R, time " + str((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL))
+        taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL, controlRotateWithR, BALL_CAR_DIS))
         # 转回来朝向球
-        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, controlNow, 0, BURGER_MAX_ANG_VEL))
+        print("Rotate Positive value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
+        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, pub_vel, 0, BURGER_MAX_ANG_VEL))
 
 
 
@@ -365,6 +430,7 @@ def updateWorldPosition(frame):
     (x, y, theta) = worldPosition()
     # d单位cm，seita单位°，所以需要转换
     (d, seita) = getErr(frame)
+
     d = d / 100
     seita = math.radians(seita)
     while seita > math.pi:
@@ -391,45 +457,56 @@ SEITA_ADDER = 0.2
 
 # 直接绕到延长线上
 def directly(frame):
-        updateWorldPosition(frame)
-        if math.fabs(carDoorTheta - seita) < DIFF:
-            if math.fabs(seita) > EPS:
-                # 如果seita为正，则需要向顺时针方向转
-                controlNow(0, -seita/T_CONTROL)
-                printCommand("Directly Rotate " + str(-seita/T_CONTROL))
-            else:
-                # 这里需要直接向前怼球，所以不指定距离
-                controlNow(0.22,0)
-                printCommand("Directly Forward")
+    updateWorldPosition(frame)
+    if math.fabs(carDoorTheta - seita) < DIFF:
+        if math.fabs(seita) > EPS:
+            # 如果seita为正，则需要向顺时针方向转
+            controlNow(0, -seita/T_CONTROL)
+            printCommand("Directly Rotate " + str(-seita/T_CONTROL))
         else:
+            # 这里需要直接向前怼球，所以不指定距离
+            controlNow(0.22,0)
+            printCommand("Directly Forward")
+    else:
+        if len(taskList) <= 0:
             rotatingToBehind()
 
 
 if __name__=="__main__":
-    settings = termios.tcgetattr(sys.stdin)
+    signal.signal(signal.SIGINT, quit)
+    signal.signal(signal.SIGTERM, quit)
+
+    # settings = termios.tcgetattr(sys.stdin)
     rospy.init_node('turtlebot3_teleop')
-    pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
     init()
 
     controllerPriEvent = threading.Event()
     controllerEvent = threading.Event()
     t1 = threading.Thread(target = controllerTaskList, args=(controllerPriEvent, controllerEvent,), name = "controllerTaskList")
+    # t2 = myThread(5, "update", 5, update_current_coord_repeating_xytheta)
     t1.start()
+    # t2.start()
 
-    oldtime = time.time()
+    # oldtime = time.time()
 
     for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
+        if quited:
+            break
         raw_capture.truncate(0)
+        if (len(taskList) > 0):
+            continue
         disErr,angErr = getErr(frame)
-        print(time.time() - oldtime)
-        oldtime = time.time()
+        # print(time.time() - oldtime)
+        # oldtime = time.time()
         print(angErr)
         if (angErr != angErr):
-            tempTime2 = time.time()
-            controlNow(0,1.5)
-            # print("control: " + str(time.time() - tempTime2))
+            print("Get NaN!")
+            controlNow(0, 1)
             continue
         else:
-            tempTime = time.time()
             directly(frame)
-            # print("directly: " + str(time.time() - tempTime))
+
+    pub_vel(0, 0)
+    print("Exited!")
+
+    # termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
