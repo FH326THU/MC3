@@ -1,0 +1,242 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# Copyright (c) 2011, Willow Garage, Inc.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#    * Neither the name of the Willow Garage, Inc. nor the names of its
+#      contributors may be used to endorse or promote products derived from
+#       this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import rospy
+from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Pose2D
+import sys, select, termios, tty
+# import socket
+import math 
+import json
+import threading
+import os
+import Queue
+import time
+
+import PIL.Image as Image
+import PIL.ImageStat as ImageStat
+from PIL import ImageEnhance
+import os
+from picamera.array import PiRGBArray
+from picamera import PiCamera
+import cv2
+import numpy as np
+from numpy import NaN
+import requests
+from find_pack import *
+import threading
+import signal
+
+BURGER_MAX_LIN_VEL = 0.22
+BURGER_MAX_ANG_VEL = 2.84
+
+WAFFLE_MAX_LIN_VEL = 0.26
+WAFFLE_MAX_ANG_VEL = 1.82
+
+LIN_VEL_STEP_SIZE = 0.01
+ANG_VEL_STEP_SIZE = 0.1
+
+T_CONTROL = 0.2   #control period
+
+msg = """
+Control Your TurtleBot3!
+---------------------------
+Moving around:
+        w
+   a    s    d
+        x
+
+w/x : increase/decrease linear velocity (Burger : ~ 0.22, Waffle and Waffle Pi : ~ 0.26)
+a/d : increase/decrease angular velocity (Burger : ~ 2.84, Waffle and Waffle Pi : ~ 1.82)
+
+space key, s : force stop
+
+CTRL-C to quit
+"""
+
+e = """
+Communications Failed
+"""
+# targetHost = "192.168.137.67"
+# targetPort = 55555
+
+# client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# client.connect((targetHost, targetPort))
+url = "http://172.16.16.10:8888/yolo_method"
+#--------------system ------------------
+
+
+def quit(signum, frame):
+    print ''
+    print 'stop fusion'
+    twist = Twist()
+    twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+    twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+    pub.publish(twist)
+    print 'stop'
+    os._exit(0)
+
+#-----------------------------------------
+
+
+def req_yolo(img):
+    res = {"image": str(img.tolist()).encode('base64')} 
+    result= json.loads(requests.post(url, json=res))
+    return result 
+
+pic_size = (640,368)
+camera = PiCamera()
+camera.resolution = pic_size
+camera.framerate = 30
+camera.awb_mode = "off"
+# raw_capture = PiRGBArray(camera, size = pic_size)
+camera.brightness = 50 # 设置图像的亮度(50表示白平衡的状态)
+camera.shutter_speed = 6000000 # 相机快门速度
+camera.iso = 800 # ISO标准实际上就是来自胶片工业的标准称谓，ISO是衡量胶片对光线敏感程度的标准。如50 ISO, 64 ISO, 100 ISO表示在曝光感应速度上要比高数值的来得慢，高数值ISO是指超过200以上的标准，如200 ISO, 400 ISO
+camera.sharpness = 0 #设置图像的锐度值，默认是0，取值范围是-100~100之间
+camera.awb_mode = "fluorescent"
+raw_capture = PiRGBArray(camera, size = pic_size)
+
+
+
+def getKey():
+    tty.setraw(sys.stdin.fileno())
+    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+    if rlist:
+        key = sys.stdin.read(1)
+    else:
+        key = ''
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    return key
+
+def getErr(frame):  
+    cv_image=frame.array
+    # cv2.imwrite(str(time.time())+'.jpg',cv_image)
+    rgb_image=np.zeros_like(cv_image)
+    rgb_image[:,:,0] = cv_image[:,:,2]
+    rgb_image[:,:,1] = cv_image[:,:,1]
+    rgb_image[:,:,2] = cv_image[:,:,0]
+    r,seita,_ = get_pos_dist(rgb_image)
+    return seita,r
+        
+
+def vels(target_linear_vel, target_angular_vel):
+    return "currently:\tlinear vel %s\t angular vel %s " % (target_linear_vel,target_angular_vel)
+
+def makeSimpleProfile(output, input, slop):
+    if input > output:
+        output = min( input, output + slop )
+    elif input < output:
+        output = max( input, output - slop )
+    else:
+        output = input
+
+    return output
+
+def constrain(input, low, high):
+    if input < low:
+      input = low
+    elif input > high:
+      input = high
+    else:
+      input = input
+
+    return input
+
+
+def pub_vel(v,w):
+    twist = Twist()
+    twist.linear.x = v; twist.linear.y = 0.0; twist.linear.z = 0.0
+    twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = w
+    pub.publish(twist)
+
+
+def controller(event):
+    global speedForward, speedRotate
+    myTime = time.time()
+    stopped = False
+    while True:
+        if event.is_set():
+            # 说明现在设置了新的指令
+            pub_vel(speedForward,speedRotate)
+            myTime = time.time()
+            event.clear()
+            stopped = False
+        if time.time() - myTime > T_CONTROL and not stopped:
+            # 如果超时5秒
+            speedRotate = 0
+            speedForward = 0
+            pub_vel(speedForward,speedRotate)
+            stopped = True
+        time.sleep(0.02) # 避免循环消耗资源过多
+
+def controlNow(speedF, speedR):
+    global speedForward, speedRotate, controllerEvent
+    speedForward = speedF
+    speedRotate = speedR
+    controllerEvent.set()
+
+if __name__=="__main__":
+
+    signal.signal(signal.SIGINT, quit)
+    signal.signal(signal.SIGTERM, quit)
+
+    #settings = termios.tcgetattr(sys.stdin)
+    rospy.init_node('turtlebot3_teleop')
+    pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+
+    
+    controllerEvent = threading.Event()
+    t1 = threading.Thread(target = controller, args=(controllerEvent,), name = "controller")
+    t1.start()
+
+    if(True):
+        print msg
+
+        for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
+            t1 = time.time()
+            angErr,disErr = getErr(frame)
+            print 'time cost =',time.time() - t1
+            raw_capture.truncate(0)
+            if (angErr!=angErr):
+                v,w=0,1.5
+                controlNow(v,w)
+            else:
+                angErr = angErr/180.0*3.14
+                w = -angErr/T_CONTROL
+                v = disErr
+                controlNow(v,w)
+
+        twist = Twist()
+        twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+        twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+        pub.publish(twist)
+
+    #termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)

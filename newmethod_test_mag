@@ -53,6 +53,7 @@ from find_pack import *
 
 from nav_msgs.msg import Odometry
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
+from sensor_msgs.msg import MagneticField
 
 BURGER_MAX_LIN_VEL = 0.22
 BURGER_MAX_ANG_VEL = 2.84
@@ -65,7 +66,7 @@ WAFFLE_MAX_ANG_VEL = 1.82
 LIN_VEL_STEP_SIZE = 0.01
 ANG_VEL_STEP_SIZE = 0.1
 
-T_CONTROL = 30
+T_CONTROL = 20
 
 msg = """
 Control Your TurtleBot3!
@@ -170,6 +171,13 @@ def get_current_coord():
     z = quaternion(odom)
     return (x,y,z)
 
+def get_current_magnetic():
+    mag = rospy.wait_for_message('/magnetic_field',MagneticField)
+    x = mag.magnetic_field.x
+    y = mag.magnetic_field.y
+    z = mag.magnetic_field.z
+    return (x,y,z)
+
 def controlNow(speedF, speedR):
     global speedForward, speedRotate, controllerEvent
     speedForward = speedF
@@ -195,24 +203,11 @@ def controller(event):
             stopped = True
         time.sleep(0.02) # 避免循环消耗资源过多
 
-# 内圈圆到圆心的距离为R，划出圆弧
-def controlRotateInner(R):
+def controlRotateWithR(R):
     if R < -BURGER_HALF_DISTANCE_WHEELS:
         R = -BURGER_HALF_DISTANCE_WHEELS
     omega = BURGER_MAX_LIN_VEL / (R + 2 * BURGER_HALF_DISTANCE_WHEELS)
     v = BURGER_MAX_LIN_VEL - omega * BURGER_HALF_DISTANCE_WHEELS
-    controlNow(v, omega)
-
-# R为正代表逆时针，R为负代表顺时针
-def controlRotateWithR(R):
-    if R <= 0:
-        R = -R
-        omega = BURGER_MAX_LIN_VEL / (R + 2 * BURGER_HALF_DISTANCE_WHEELS)
-        v = BURGER_MAX_LIN_VEL - omega * BURGER_HALF_DISTANCE_WHEELS
-        omega = -omega
-    else:
-        omega = BURGER_MAX_LIN_VEL / (R + 2 * BURGER_HALF_DISTANCE_WHEELS)
-        v = BURGER_MAX_LIN_VEL - omega * BURGER_HALF_DISTANCE_WHEELS
     controlNow(v, omega)
 #-------------------------------Basic Route Planning---------------------------------------------
 
@@ -320,10 +315,13 @@ if __name__=="__main__":
     settings = termios.tcgetattr(sys.stdin)
     rospy.init_node('turtlebot3_teleop')
     pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
-    init()
+    #init()
 
-    controllerEvent = threading.Event()
-    t1 = threading.Thread(target = controller, args=(controllerEvent,), name = "controller")
-    t1.start()
-
-    controlRotateWithR(0.4)
+    #controllerEvent = threading.Event()
+    #t1 = threading.Thread(target = controller, args=(controllerEvent,), name = "controller")
+    #t1.start()
+    while(1):
+      x,y,z = get_current_magnetic()
+      print x,y,z
+      time.sleep(0.2)
+    #controlRotateWithR(0.2)

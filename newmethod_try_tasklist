@@ -93,6 +93,7 @@ Communications Failed
 # client.connect((targetHost, targetPort))
 url = "http://172.16.16.10:8888/yolo_method"
 
+
 #------------------------------ image get ---------------------------------------------------
 def req_yolo(img):
     res = {"image": str(img.tolist()).encode('base64')} 
@@ -195,6 +196,7 @@ def controller(event):
             stopped = True
         time.sleep(0.02) # 避免循环消耗资源过多
 
+
 # 内圈圆到圆心的距离为R，划出圆弧
 def controlRotateInner(R):
     if R < -BURGER_HALF_DISTANCE_WHEELS:
@@ -214,6 +216,113 @@ def controlRotateWithR(R):
         omega = BURGER_MAX_LIN_VEL / (R + 2 * BURGER_HALF_DISTANCE_WHEELS)
         v = BURGER_MAX_LIN_VEL - omega * BURGER_HALF_DISTANCE_WHEELS
     controlNow(v, omega)
+
+#------------------------------- task list part -------------------------------
+taskList = []
+class task:
+    timeLen = fun = arg = startTime = 0
+    started = False
+    '记录每一个任务的时间以及指令'
+    def __init__(self, mtime, mfun, *marg):
+        (self.timeLen, self.fun, self.arg) = (mtime, mfun, marg)
+    def run(self):
+        self.startTime = time.time()
+        self.started = True
+        self.fun(*self.arg)
+    def checkFinished(self):
+        if not self.started:
+            # 直接运行！
+            self.run()
+            return False
+        return self.started and (time.time() - self.startTime >= self.timeLen)
+
+# 下面两个函数可以执行某个操作，所以可直接在函数外定义变量（函数以及其参数）以执行
+def runPriority():
+    # 在这里进行必要的操作
+    print("Priority Now!")
+
+def getNewTaskList():
+    print("Get now!")
+    return False
+
+# 基于TaskList的主函数
+# 基本逻辑：在主线程的while循环里面不断进行观察与计算，如果发现有严重bug则设置priorityevent来中断、清空当前taskList
+def controllerTaskList(priorityevent, event):
+    global speedForward, speedRotate, taskList
+    myTime = time.time()
+    stopped = False
+    while True:
+        if priorityevent.is_set():
+            # 优先事件，其参数放在全局变量里面吧
+            # 清空所有taskList的元素
+            taskList = []
+            runPriority()
+            priorityevent.clear()
+        elif len(taskList) > 0:
+            # 优先执行taskList的部分
+            if taskList[0].checkFinished():
+                taskList.pop(0)
+                continue
+        else:
+            # 请求taskList的任务
+            if getNewTaskList():
+                continue
+            if event.is_set():
+                # 说明现在设置了新的指令
+                pub_vel(speedForward,speedRotate)
+                myTime = time.time()
+                event.clear()
+                stopped = False
+            if time.time() - myTime > T_CONTROL and not stopped:
+                # 如果超时T_CONTROL秒
+                speedRotate = 0
+                speedForward = 0
+                pub_vel(speedForward,speedRotate)
+                stopped = True
+        time.sleep(0.02) # 避免循环消耗资源过多
+
+#------------------------------- Car control using tasklist -------------------------------
+
+# 首先转向球的方向
+def rotatingToBehind():
+    global taskList
+    taskList.append(task(seita / BURGER_MAX_ANG_VEL, controlNow, 0, BURGER_MAX_ANG_VEL))
+    # 之后就可以绕球转了!
+    taskList.append(task(0, checkD))
+
+# 球和车的距离，先移动到这个距离再转！
+BALL_CAR_DIS = 0.3
+# 有一些误差，距离球的距离的偏差值
+BALL_CAR_EPS = 0.05
+
+# 绕球转动
+def checkD():
+    global taskList
+    # 如果和理想距离差的比较多，就过去！
+    if d > BALL_CAR_DIS + BALL_CAR_EPS:
+        # d比较大，往前走
+        taskList.append(task((d - BALL_CAR_DIS) / BURGER_MAX_LIN_VEL, controlNow, BURGER_MAX_LIN_VEL, 0))
+    elif BALL_CAR_DIS > d + BALL_CAR_EPS:
+        # d比较小，往后走
+        taskList.append(task((BALL_CAR_DIS - d) / BURGER_MAX_LIN_VEL, controlNow, -BURGER_MAX_LIN_VEL, 0))
+    # 之后转动到球门和球延长线后面
+    if carDoorTheta > 0:
+        # 球门在右侧，所以逆时针转
+        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, controlNow, 0, BURGER_MAX_ANG_VEL))
+        # 之后顺时针走
+        taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) / BURGER_MAX_LIN_VEL, controlRotateWithR, -BALL_CAR_DIS))
+        # 转回来朝向球
+        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, controlNow, 0, -BURGER_MAX_ANG_VEL))
+    else:
+        # 球门在左侧，所以顺时针转
+        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, controlNow, 0, -BURGER_MAX_ANG_VEL))
+        # 之后逆时针走
+        taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) / BURGER_MAX_LIN_VEL, controlRotateWithR, BALL_CAR_DIS))
+        # 转回来朝向球
+        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, controlNow, 0, BURGER_MAX_ANG_VEL))
+
+
+
 #-------------------------------Basic Route Planning---------------------------------------------
 
 x = y = xBase = yBase = theta = carDoorTheta = seita = d = 0
@@ -292,28 +401,8 @@ def directly(frame):
                 # 这里需要直接向前怼球，所以不指定距离
                 controlNow(0.22,0)
                 printCommand("Directly Forward")
-        elif carDoorTheta > SEITA_ADDER and seita > SEITA_ADDER:
-            # 球门和球在同侧的情况
-            if carDoorTheta > seita:
-                controlNow(0.22,0)
-                printCommand("All right, Directly Forward")
-            else:
-                controlNow(-0.22,0)
-                printCommand("All right, Directly Backward")
-        elif carDoorTheta < -SEITA_ADDER and seita < -SEITA_ADDER:
-            # 球门和球在同侧的情况
-            if carDoorTheta < seita:
-                controlNow(0.22,0)
-                printCommand("All left, Directly Forward")
-            else:
-                controlNow(-0.22,0)
-                printCommand("All left, Directly Backward")
-        elif carDoorTheta < seita:
-            controlNow(0.22, -(seita + SEITA_ADDER)/T_CONTROL)
-            printCommand("Right, rotate: " + str(-(seita + SEITA_ADDER)/T_CONTROL))
         else:
-            controlNow(0.22, -(seita - SEITA_ADDER)/T_CONTROL)
-            printCommand("Left, rotate: " + str(-(seita - SEITA_ADDER)/T_CONTROL))
+            rotatingToBehind()
 
 
 if __name__=="__main__":
@@ -322,8 +411,25 @@ if __name__=="__main__":
     pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
     init()
 
+    controllerPriEvent = threading.Event()
     controllerEvent = threading.Event()
-    t1 = threading.Thread(target = controller, args=(controllerEvent,), name = "controller")
+    t1 = threading.Thread(target = controllerTaskList, args=(controllerPriEvent, controllerEvent,), name = "controllerTaskList")
     t1.start()
 
-    controlRotateWithR(0.4)
+    oldtime = time.time()
+
+    for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
+        raw_capture.truncate(0)
+        disErr,angErr = getErr(frame)
+        print(time.time() - oldtime)
+        oldtime = time.time()
+        print(angErr)
+        if (angErr != angErr):
+            tempTime2 = time.time()
+            controlNow(0,1.5)
+            # print("control: " + str(time.time() - tempTime2))
+            continue
+        else:
+            tempTime = time.time()
+            directly(frame)
+            # print("directly: " + str(time.time() - tempTime))
