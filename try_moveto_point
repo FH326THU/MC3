@@ -487,7 +487,7 @@ def directly(frame):
         if len(taskList) <= 0:
             rotatingToBehind()
 
-ANGLE_MAX_DIFF = 0.1
+ANGLE_MAX_DIFF = 0.05
 DISTANCE_MAX_DIFF = 0.02
 
 def radToRange(rad):
@@ -566,16 +566,18 @@ if __name__=="__main__":
     # oldtime = time.time()
 
     while True:
-        tx = input("Input target x")
-        if tx == 'x':
-            print("Exiting...")
+        try:
+            tx = input("Input target x: ")
+            tx = float(tx)
+            ty = input("Input target y: ")
+            ty = float(ty)
+            ttheta = input("Input target theta(rad): ")
+            ttheta = float(ttheta)
+            moveToPoint(tx, ty, ttheta)
+            print(worldPosition())
+        except Expression as identifier:
             break
-        tx = float(tx)
-        ty = input("Input target y")
-        ty = float(ty)
-        ttheta = input("Input target theta")
-        ttheta = float(ttheta)
-        moveToPoint(tx, ty, ttheta)
+        
 
     pub_vel(0, 0)
     print("Exited!")

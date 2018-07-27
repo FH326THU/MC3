@@ -53,12 +53,13 @@ from find_pack import *
 from find_pack_v2_0 import *
 import threading
 import signal
+from find_pack_with_yolo_v1_1 import *
 
 from nav_msgs.msg import Odometry
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
 
-BURGER_MAX_LIN_VEL = 0.22 / 3
-BURGER_MAX_ANG_VEL = 2.84 / 3
+BURGER_MAX_LIN_VEL = 0.22
+BURGER_MAX_ANG_VEL = 2.84
 
 BURGER_HALF_DISTANCE_WHEELS = BURGER_MAX_LIN_VEL / BURGER_MAX_ANG_VEL
 
@@ -167,9 +168,23 @@ def getErr(frame):
     rgb_image[:,:,0] = cv_image[:,:,2]
     rgb_image[:,:,1] = cv_image[:,:,1]
     rgb_image[:,:,2] = cv_image[:,:,0]
-    r,seita,_ = get_information_from_rgb_image(rgb_image,info="ball")
+    r,seita,_ = get_pos_dist(rgb_image)
+    # r,seita,_ = get_information_from_rgb_image(rgb_image,info="ball")
     return (r,seita)
     
+
+def getErr_with_yolo(frame):
+    tic = time.time()
+    imgpath = 'yolo.jpg'
+    cv2.imwrite(imgpath,frame.array)
+    yolo_result = req_yolo(imgpath)
+    disErr,angErr,_ = get_information_from_rgb_image_yolo(yolo_result,info="yolo_ball")
+    if disErr < 25.0:
+        disErr,angErr = getErr(frame) 
+    toc = time.time()
+    print disErr,angErr,"yolo time: ",toc-tic
+    return disErr,angErr
+
  #---------------------------------Car Control Functions---------------------------------------- 
 
 def vels(target_linear_vel, target_angular_vel):
@@ -361,45 +376,62 @@ def RotatePositive(a, b):
 def RotateNegetive(a, b):
     pub_vel(a,b)
 
+EPS = 0.1 # 认为这个是误差，如果角度小于EPS就认为是正对着
+DIFF = 0.2 # 认为两个角度差距小于DIFF就是在一条直线上
+SEITA_ADDER = 0.2
+
 # 绕球转动
 def checkD():
     global taskList
-    # 如果和理想距离差的比较多，就过去！
-    if d > BALL_CAR_DIS + BALL_CAR_EPS:
-        # d比较大，往前走
-        print("Added forward " + str(d - BALL_CAR_DIS))
-        taskList.append(task((d - BALL_CAR_DIS) / BURGER_MAX_LIN_VEL, Forward, BURGER_MAX_LIN_VEL, 0))
-    elif BALL_CAR_DIS > d + BALL_CAR_EPS:
-        # d比较小，往后走
-        print("Added backward " + str(-(d - BALL_CAR_DIS)))
-        taskList.append(task((BALL_CAR_DIS - d) / BURGER_MAX_LIN_VEL, Backward, -BURGER_MAX_LIN_VEL, 0))
-    # 之后转动到球门和球延长线后面
-    if carDoorTheta > 0:
-        # 球门在右侧，所以逆时针转
-        print("Rotate Positive value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
-        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotatePositive, 0, BURGER_MAX_ANG_VEL))
-        # 之后顺时针走
-        d2_2 = (x ** 2) + (y - DOORPOS) ** 2
-        d3 = math.sqrt(BALL_CAR_DIS**2 + d2_2 - 2 * BALL_CAR_DIS * math.sqrt(d2_2) * math.cos(carDoorTheta))
-        alpha = math.asin(BALL_CAR_DIS / d3 * math.sin(carDoorTheta)) + carDoorTheta
-        print("Rotate Negative with R, time " + str((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL))
-        taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL , controlRotateWithR, -BALL_CAR_DIS))
-        # 转回来朝向球
-        print("Rotate Negative value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
-        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotateNegetive, 0, -BURGER_MAX_ANG_VEL))
+    if math.fabs(carDoorTheta - seita) < DIFF:
+        if math.fabs(seita) > EPS:
+            # 如果seita为正，则需要向顺时针方向转
+            controlNow(0, -seita/T_CONTROL)
+            printCommand("Directly Rotate " + str(-seita/T_CONTROL))
+        else:
+            # 这里需要直接向前怼球，所以不指定距离
+            controlNow(0.11,0)
+            printCommand("Directly Forward")
     else:
-        # 球门在左侧，所以顺时针转
-        print("Rotate Negative value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
-        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotateNegetive, 0, -BURGER_MAX_ANG_VEL))
-        # 之后逆时针走
-        d2_2 = (x ** 2) + (y - DOORPOS) ** 2
-        d3 = math.sqrt(BALL_CAR_DIS**2 + d2_2 - 2 * BALL_CAR_DIS * math.sqrt(d2_2) * math.cos(carDoorTheta))
-        alpha = math.asin(BALL_CAR_DIS / d3 * math.sin(-carDoorTheta)) - carDoorTheta
-        print("Rotate Positive with R, time " + str((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL))
-        taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL, controlRotateWithR, BALL_CAR_DIS))
-        # 转回来朝向球
-        print("Rotate Positive value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
-        taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotatePositive, 0, BURGER_MAX_ANG_VEL))
+        # 如果和理想距离差的比较多，就过去！
+        if math.fabs(seita) > 0.1
+            taskList = []
+            rotatingToBehind()
+        if d > BALL_CAR_DIS + BALL_CAR_EPS:
+            # d比较大，往前走
+            print("Added forward " + str(d - BALL_CAR_DIS))
+            taskList.append(task((d - BALL_CAR_DIS) / BURGER_MAX_LIN_VEL, Forward, BURGER_MAX_LIN_VEL, 0))
+        elif BALL_CAR_DIS > d + BALL_CAR_EPS:
+            # d比较小，往后走
+            print("Added backward " + str(-(d - BALL_CAR_DIS)))
+            taskList.append(task((BALL_CAR_DIS - d) / BURGER_MAX_LIN_VEL, Backward, -BURGER_MAX_LIN_VEL, 0))
+        # 之后转动到球门和球延长线后面
+        if carDoorTheta > 0:
+            # 球门在右侧，所以逆时针转
+            print("Rotate Positive value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
+            taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotatePositive, 0, BURGER_MAX_ANG_VEL))
+            # 之后顺时针走
+            d2_2 = (x ** 2) + (y - DOORPOS) ** 2
+            d3 = math.sqrt(BALL_CAR_DIS**2 + d2_2 - 2 * BALL_CAR_DIS * math.sqrt(d2_2) * math.cos(carDoorTheta))
+            alpha = math.asin(BALL_CAR_DIS / d3 * math.sin(carDoorTheta)) + carDoorTheta
+            print("Rotate Negative with R, time " + str((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL))
+            taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL , controlRotateWithR, -BALL_CAR_DIS))
+            # 转回来朝向球
+            print("Rotate Negative value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
+            taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotateNegetive, 0, -BURGER_MAX_ANG_VEL))
+        else:
+            # 球门在左侧，所以顺时针转
+            print("Rotate Negative value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
+            taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotateNegetive, 0, -BURGER_MAX_ANG_VEL))
+            # 之后逆时针走
+            d2_2 = (x ** 2) + (y - DOORPOS) ** 2
+            d3 = math.sqrt(BALL_CAR_DIS**2 + d2_2 - 2 * BALL_CAR_DIS * math.sqrt(d2_2) * math.cos(carDoorTheta))
+            alpha = math.asin(BALL_CAR_DIS / d3 * math.sin(-carDoorTheta)) - carDoorTheta
+            print("Rotate Positive with R, time " + str((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL))
+            taskList.append(task((BURGER_HALF_DISTANCE_WHEELS + BALL_CAR_DIS) * alpha / BURGER_MAX_LIN_VEL, controlRotateWithR, BALL_CAR_DIS))
+            # 转回来朝向球
+            print("Rotate Positive value, time: " + str(math.pi/2 / BURGER_MAX_ANG_VEL))
+            taskList.append(task(math.pi/2 / BURGER_MAX_ANG_VEL, RotatePositive, 0, BURGER_MAX_ANG_VEL))
 
 
 
@@ -444,7 +476,8 @@ def updateWorldPosition(frame):
     global x, y, theta, carDoorTheta, seita, d
     (x, y, theta) = worldPosition()
     # d单位cm，seita单位°，所以需要转换
-    (d, seita) = getErr(frame)
+    (d, seita) = getErr_with_yolo(frame)
+    disAng = seita
 
     d = d / 100
     seita = math.radians(seita)
@@ -465,10 +498,8 @@ def updateWorldPosition(frame):
         carDoorTheta -= math.pi
     while carDoorTheta <= -math.pi:
         carDoorTheta += math.pi
-
-EPS = 0.1 # 认为这个是误差，如果角度小于EPS就认为是正对着
-DIFF = 0.2 # 认为两个角度差距小于DIFF就是在一条直线上
-SEITA_ADDER = 0.2
+    
+    return d,disAng
 
 # 直接绕到延长线上
 def directly(frame):
@@ -479,7 +510,7 @@ def directly(frame):
             printCommand("Directly Rotate " + str(-seita/T_CONTROL))
         else:
             # 这里需要直接向前怼球，所以不指定距离
-            controlNow(0.22,0)
+            controlNow(0.11,0)
             printCommand("Directly Forward")
     else:
         if len(taskList) <= 0:
@@ -504,20 +535,22 @@ if __name__=="__main__":
     # oldtime = time.time()
 
     for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
-        updateWorldPosition(frame)
-        printCommand('')
+        disErr,angErr = updateWorldPosition(frame)
+        # printCommand('')
         if quited:
             break
         raw_capture.truncate(0)
         if (len(taskList) > 0):
             continue
-        disErr,angErr = getErr(frame)
+        # disErr,angErr = getErr(frame)
 
         # if cnt % 5 == 0:
-        #     imgpath = 'yolo.jpg'
-        #     cv2.imwrite(imgpath,frame.array)
-        #     yolo_result = req_yolo(imgpath)
-        #     print yolo_result
+        # tic = time.time()
+        # imgpath = 'yolo.jpg'
+        # cv2.imwrite(imgpath,frame.array)
+        # yolo_result = req_yolo(imgpath)
+        # disErr,angErr,_ = get_information_from_rgb_image_yolo(yolo_result,info="yolo_ball")
+        # disErr,angErr = getErr_with_yolo(frame)
 
         # print(time.time() - oldtime)
         # oldtime = time.time()
